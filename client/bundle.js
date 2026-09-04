@@ -29,7 +29,10 @@ window.__ModuleLoader__.load({
      * Each rule may carry an optional ordered model chain (`models`) plus an
      * optional provider allowlist (`allowedProviders`) and an optional agent
      * preset (`agentPreset`) mounted on each run's fresh session — the same policy
-     * fields the scheduled-items fork exposes. On top of that, a rule carries the
+     * fields the scheduled-items fork exposes. A rule may also opt into pinned
+     * session mode (`sessionMode: "pinned"` + `sessionKey`) so every trigger reuses
+     * one stable session; the list then shows the live pinned session id and a
+     * "Reset pinned session" action. On top of that, a rule carries the
      * watch configuration: `workspaceId` (required), `watchPaths` (relative
      * directories/files), optional `globs`/`ignoreGlobs`, and a `debounceMs`
      * window. The panel below edits those fields and surfaces trigger/run metadata
@@ -119,6 +122,23 @@ window.__ModuleLoader__.load({
       agentPresetMissing: '所选 agent 预设已不可用，本次运行会失败——请重新选择或清空为默认。',
       presetConfigured: '预设',
       presetUsed: '使用预设',
+      // New: pinned session mode
+      sessionModeLabel: '会话模式',
+      sessionModeFresh: '每次触发新建会话',
+      sessionModePinned: '固定会话（跨触发复用）',
+      sessionModeHint: '固定会话让这条规则的所有触发复用同一个 agent 会话，便于在同一会话里跟踪它的连续历史；默认仍是每次新建。',
+      sessionKeyLabel: '固定会话 Key',
+      sessionKeyPlaceholder: '例如 raw-ingest',
+      sessionKeyHint: '以小写字母或数字开头，只能包含小写字母、数字和连字符（[a-z0-9][a-z0-9-]*）。同一个 Key 只能被一条规则使用。',
+      sessionKeyRequired: '固定会话模式下必须填写固定会话 Key。',
+      sessionKeyInvalid: '固定会话 Key 必须以小写字母或数字开头，且只能包含小写字母、数字和连字符。',
+      sessionResetNeededHint: '修改工作区 / 模型 / 预设等运行配置后，需要“重置固定会话”，改动才会在下次触发生效。',
+      pinnedBadge: '固定会话',
+      pinnedSessionId: '会话',
+      pinnedDead: '失效',
+      resetPinned: '重置固定会话',
+      resetPinnedHint: '结束当前固定会话；下次触发会用最新配置新建会话。',
+      resetConfirm: '重置会结束当前固定会话，下次触发会用最新配置新建一个会话。确定重置？',
     }
 
     const EN = {
@@ -198,6 +218,23 @@ window.__ModuleLoader__.load({
       agentPresetMissing: 'The selected agent preset is unavailable, so runs would fail — pick another or clear back to default.',
       presetConfigured: 'preset',
       presetUsed: 'preset used',
+      // New: pinned session mode
+      sessionModeLabel: 'Session mode',
+      sessionModeFresh: 'Fresh session per trigger',
+      sessionModePinned: 'Pinned session (reused across triggers)',
+      sessionModeHint: 'Pinned mode makes every trigger of this rule reuse one stable agent session, so its ongoing history stays together. Default is a fresh session per trigger.',
+      sessionKeyLabel: 'Pinned session key',
+      sessionKeyPlaceholder: 'e.g. raw-ingest',
+      sessionKeyHint: 'Starts with a lowercase letter or digit; may contain only lowercase letters, digits, and hyphens ([a-z0-9][a-z0-9-]*). One key can be used by only one rule.',
+      sessionKeyRequired: 'A pinned session mode requires a session key.',
+      sessionKeyInvalid: 'A pinned session key must start with a lowercase letter or digit and contain only lowercase letters, digits, and hyphens.',
+      sessionResetNeededHint: 'Run-config changes (workspace / model / preset) take effect only after a "Reset pinned session".',
+      pinnedBadge: 'pinned',
+      pinnedSessionId: 'session',
+      pinnedDead: 'dead',
+      resetPinned: 'Reset pinned session',
+      resetPinnedHint: 'Ends the current pinned session; the next trigger creates one with the latest config.',
+      resetConfirm: 'Resetting ends the current pinned session; the next trigger will create a new one with the latest config. Reset?',
     }
 
     const LOCALE_DICT = { zh: ZH, en: EN }
@@ -253,6 +290,8 @@ window.__ModuleLoader__.load({
     .fe-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;line-height:1;padding:3px 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);white-space:nowrap}
     .fe-badgeDot{width:6px;height:6px;border-radius:50%;background:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-secondary))}
     .fe-chain{font-size:12px;font-feature-settings:"tnum" 1;min-width:0}
+    .fe-badgeDotDead{background:var(--dsw-alias-state-error-primary,var(--dsw-alias-label-secondary))}
+    .fe-sessionId{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
     .fe-btn{font-size:13px;padding:5px 10px;border-radius:7px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-primary);cursor:pointer;transition:background .16s,border-color .16s,color .16s}
     .fe-btn:hover:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-label-primary) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-label-primary) 24%,var(--dsw-alias-border-l2))}
     .fe-btn:active:not(:disabled){background:color-mix(in srgb,var(--dsw-alias-label-primary) 18%,transparent)}
@@ -327,6 +366,14 @@ window.__ModuleLoader__.load({
         && item.allowedProviders[0] === 'local'
     }
 
+    /** Mirrors the Host half's pinned-session key rule. */
+    const SESSION_KEY_RE = /^[a-z0-9][a-z0-9-]*$/
+
+    /** Abbreviate a long session id for the row badge, keeping the full id in a title. */
+    function shortId(id) {
+      return id && id.length > 16 ? `${id.slice(0, 14)}…` : id
+    }
+
     function formatTime(iso) {
       if (!iso) return ''
       return new Date(iso).toLocaleString()
@@ -368,6 +415,8 @@ window.__ModuleLoader__.load({
           models: [{ provider: 'local', model: '' }],
           allowedText: '',
           agentPreset: '',
+          sessionMode: 'fresh',
+          sessionKey: '',
         })
 
         /**
@@ -431,6 +480,8 @@ window.__ModuleLoader__.load({
               : [{ provider: 'local', model: '' }],
             allowedText: Array.isArray(item.allowedProviders) ? item.allowedProviders.join(', ') : '',
             agentPreset: typeof item.agentPreset === 'string' ? item.agentPreset : '',
+            sessionMode: item.sessionMode === 'pinned' ? 'pinned' : 'fresh',
+            sessionKey: typeof item.sessionKey === 'string' ? item.sessionKey : '',
           })
 
           // The payload always carries the policy fields. An empty `models: []` /
@@ -455,6 +506,10 @@ window.__ModuleLoader__.load({
               models: form.modelsEnabled ? completeRows : [],
               allowedProviders: allowed,
               agentPreset: form.agentPreset || '',
+              // Always sent: "fresh" + an empty key tells the Host half to clear
+              // any previously pinned mapping; "pinned" carries the session key.
+              sessionMode: form.sessionMode,
+              sessionKey: form.sessionMode === 'pinned' ? form.sessionKey.trim() : '',
             }
           }
 
@@ -464,6 +519,17 @@ window.__ModuleLoader__.load({
             if (!form.title.trim() || !form.prompt.trim() || !form.workspaceId || watchPaths.length === 0) {
               window.alert(t('invalidForm'))
               return
+            }
+            if (form.sessionMode === 'pinned') {
+              const key = form.sessionKey.trim()
+              if (!key) {
+                window.alert(t('sessionKeyRequired'))
+                return
+              }
+              if (!SESSION_KEY_RE.test(key)) {
+                window.alert(t('sessionKeyInvalid'))
+                return
+              }
             }
             const completeRows = form.models
               .filter((row) => row.provider.trim() !== '' && row.model.trim() !== '')
@@ -517,6 +583,16 @@ window.__ModuleLoader__.load({
               setError(String((err && err.message) || err))
             }
             setRunningId(null)
+          }
+
+          const resetPinned = async (id) => {
+            try {
+              const response = await fetch(`${API}/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }) })
+              await readJson(response)
+              await load()
+            } catch (err) {
+              setError(String((err && err.message) || err))
+            }
           }
 
           // Immutable helpers over form.models.
@@ -672,19 +748,31 @@ window.__ModuleLoader__.load({
             loading && React.createElement('p', { className: 'fe-muted' }, t('loading')),
             !loading && rules.length === 0 && !error && React.createElement('p', { className: 'fe-muted' }, t('empty')),
             React.createElement('ul', { className: 'fe-list' },
-              rules.map((item) =>
-                React.createElement('li', { key: item.id, className: 'fe-row' },
+              rules.map((item) => {
+                const pinned = item.sessionMode === 'pinned'
+                const pin = pinned ? item.pinnedSession : undefined
+                const pinnedLive = !!pin && !!pin.live
+                const hasGlobs = Array.isArray(item.globs) && item.globs.length > 0
+                const showSub = pinned || isLocalOnly(item) || hasGlobs || modelChainLabel(item) !== ''
+                return React.createElement('li', { key: item.id, className: 'fe-row' },
                   React.createElement('div', { className: 'fe-rowMain' },
                     React.createElement('span', { className: 'fe-rowTitle' }, item.title),
                     React.createElement('span', { className: 'fe-rowPath', title: (item.watchPaths || []).join('\n') },
                       `${t('watch')}: ${(item.watchPaths || []).join(', ')}`
                     ),
-                    (modelChainLabel(item) || isLocalOnly(item) || (Array.isArray(item.globs) && item.globs.length > 0)) && React.createElement('span', { className: 'fe-rowSub' },
+                    showSub && React.createElement('span', { className: 'fe-rowSub' },
+                      pinned && React.createElement('span', { className: 'fe-badge', title: t('sessionModePinned') },
+                        pin && React.createElement('span', { className: `fe-badgeDot${pinnedLive ? '' : ' fe-badgeDotDead'}`, 'aria-hidden': 'true' }),
+                        t('pinnedBadge')
+                      ),
+                      pin && React.createElement('span', { className: 'fe-sessionId', title: pin.sessionId },
+                        `${t('pinnedSessionId')}: ${shortId(pin.sessionId)}${pinnedLive ? '' : ` (${t('pinnedDead')})`}`
+                      ),
                       isLocalOnly(item) && React.createElement('span', { className: 'fe-badge' },
                         React.createElement('span', { className: 'fe-badgeDot', 'aria-hidden': 'true' }),
                         t('badgeLocalOnly')
                       ),
-                      Array.isArray(item.globs) && item.globs.length > 0
+                      hasGlobs
                         && React.createElement('span', { className: 'fe-chain', title: t('globsHint') }, item.globs.join(', ')),
                       modelChainLabel(item) && React.createElement('span', { className: 'fe-chain', title: t('chainSummaryHint') }, modelChainLabel(item))
                     ),
@@ -697,6 +785,12 @@ window.__ModuleLoader__.load({
                       disabled: runningId === item.id,
                       onClick: () => void runNow(item.id),
                     }, runningId === item.id ? t('running') : t('runNow')),
+                    pinned && pin && React.createElement('button', {
+                      type: 'button',
+                      className: 'fe-btn',
+                      title: t('resetPinnedHint'),
+                      onClick: () => { if (window.confirm(t('resetConfirm'))) void resetPinned(item.id) },
+                    }, t('resetPinned')),
                     React.createElement('button', {
                       type: 'button',
                       className: 'fe-btn',
@@ -709,7 +803,7 @@ window.__ModuleLoader__.load({
                     }, t('delete'))
                   )
                 )
-              )
+              })
             ),
             form === null
               ? React.createElement('button', { type: 'button', className: 'fe-btn fe-btn-primary', onClick: openNew }, t('newItem'))
@@ -814,6 +908,29 @@ window.__ModuleLoader__.load({
                   React.createElement('small', { className: 'fe-hint' }, t('agentPresetHint')),
                   selectedPresetMissing
                     && React.createElement('small', { className: 'fe-warn', role: 'alert' }, t('agentPresetMissing'))
+                ),
+                React.createElement('label', { className: 'fe-field' },
+                  React.createElement('span', null, t('sessionModeLabel')),
+                  React.createElement('select', {
+                    value: form.sessionMode,
+                    disabled,
+                    onChange: (event) => setForm((current) => ({ ...current, sessionMode: event.target.value })),
+                  },
+                    React.createElement('option', { value: 'fresh' }, t('sessionModeFresh')),
+                    React.createElement('option', { value: 'pinned' }, t('sessionModePinned'))
+                  ),
+                  React.createElement('small', { className: 'fe-hint' }, t('sessionModeHint'))
+                ),
+                form.sessionMode === 'pinned' && React.createElement('label', { className: 'fe-field' },
+                  React.createElement('span', null, t('sessionKeyLabel')),
+                  React.createElement('input', {
+                    value: form.sessionKey,
+                    disabled,
+                    placeholder: t('sessionKeyPlaceholder'),
+                    onChange: (event) => setForm((current) => ({ ...current, sessionKey: event.target.value })),
+                  }),
+                  React.createElement('small', { className: 'fe-hint' }, t('sessionKeyHint')),
+                  React.createElement('small', { className: 'fe-warn' }, t('sessionResetNeededHint'))
                 ),
                 renderModelEditor(form.models, form.modelsEnabled, (checked) => setForm((current) => ({ ...current, modelsEnabled: checked }))),
                 React.createElement('label', { className: 'fe-checkbox' },

@@ -7,6 +7,7 @@ DeepSeek Harness 插件：**文件变化事件触发**。每条监听规则（wa
 - 规则可固定 provider/model，或配置一个**按顺序尝试的模型链**；某个模型在会话启动阶段失败会自动回退到下一个候选模型。
 - 可通过 `allowedProviders` 限定候选 provider，确保触发任务永远不会误用白名单之外的 provider（例如仅本地 `local`）。
 - 规则可指定会话挂载的 **agent 预设**（`agentPreset`），让不同规则以不同工具集运行。
+- 规则可选择 **pinned（固定会话）模式**：所有触发复用同一个稳定的 agent 会话（`sessionKey` → 持久化的会话映射），而不是每次触发新建——便于在同一会话中追踪一条规则的连续历史。
 
 ## 安装
 
@@ -44,6 +45,7 @@ dsh plugin --profile web add dsh-plugin-file-events
 - **持久化**：走 storage-domain（domain `file_events`，表 `rules`）；web 组合可将其路由到 SQLite 后端。
 - **模型链 / Provider 白名单 / Agent 预设**：同 cron 插件，见下文。
 - **触发与运行元数据**：每次触发记录 `lastTriggerAt` 与 `lastTriggerFiles`；每次运行记录 `lastRunAt`、`lastRunModel`、`lastRunPreset`、`lastRunAttempts`、`lastRunError`。
+- **固定会话模式（pinned session）**：规则可选择复用同一个稳定 agent 会话而不是每次触发新建——详见下文「固定会话模式」。
 
 ## 规则字段
 
@@ -60,6 +62,8 @@ dsh plugin --profile web add dsh-plugin-file-events
 | `models` | 否 | 有序模型链 `[{ provider, model }]`；缺省按全局默认模型执行 |
 | `allowedProviders` | 否 | provider 白名单；执行前过滤候选 |
 | `agentPreset` | 否 | 触发会话挂载的 agent 预设 id；留空用全局默认预设 |
+| `sessionMode` | 否 | `"fresh" \| "pinned"`，默认 `"fresh"`；见「固定会话模式」 |
+| `sessionKey` | 否 | 固定会话的逻辑 Key，匹配 `[a-z0-9][a-z0-9-]*`；仅当 `sessionMode: "pinned"` 时必填，且一个 Key 只能被一条规则使用 |
 
 示例：
 
@@ -114,6 +118,46 @@ dsh plugin --profile web add dsh-plugin-file-events
 
 `agentPreset` 遵循 dsh 预设 id 约定 `[a-z0-9][a-z0-9-]*`；`null` / `""` 视为清除。执行时在尝试任何模型候选**之前**先解析预设：指定预设不存在或部署没有 agentPresets 服务 → 本次运行直接失败（`agent preset '<id>' not found`）；指定预设损坏 → 直接失败（`... failed to mount: <原因>`）；省略/清空 → 挂载部署的**默认**预设（没有该服务则按无预设会话运行）。预设解析失败发生在模型候选之前，因此**不会**触发模型链回退。每次成功运行把实际挂载的预设 id 写入 `lastRunPreset`；失败运行清空旧值。
 
+## 固定会话模式（Pinned Session）
+
+默认（`sessionMode` 省略或为 `"fresh"`）每次触发都新建一个 agent 会话。开启 **pinned** 后，该规则的所有触发复用**同一个稳定 agent 会话**：第一次触发创建会话并把 `sessionKey → sessionId` 映射持久化下来，之后的触发（无论是否有文件清单）直接向该会话提交消息，方便在同一会话中追踪一条规则带来的连续变化。
+
+```jsonc
+{
+  "title": "Raw ingest",
+  "prompt": "处理这批新写入的文件，按项目约定整理后更新索引。文件列表：{files}",
+  "enabled": true,
+  "workspaceId": "web",
+  "watchPaths": ["inbox/raw"],
+  "debounceMs": 15000,
+  "sessionMode": "pinned",
+  "sessionKey": "web-raw-ingest", // 同一 Key 只能被一条规则使用
+  "agentPreset": "web",
+  "allowedProviders": ["local"]
+}
+```
+
+### 字段语义
+
+- `sessionMode`：`"fresh" | "pinned"`，默认 `"fresh"`（缺失即默认，旧数据无需迁移）。
+- `sessionKey`：固定会话的逻辑 Key，需匹配 `[a-z0-9][a-z0-9-]*`；仅当 `sessionMode: "pinned"` 时必填。**一个 Key 只能被一条规则使用**（多条规则共享一个固定会话不在范围内）。
+- `sessionMode: "fresh"`（或 `sessionKey: null` / `""`）会清除固定的会话映射；PATCH 把该字段从 `pinned` 改为 `fresh` 会丢弃旧映射。
+
+### 执行语义
+
+1. 每个触发点（防抖窗口结束 / 「立即执行」）都汇入一个**按规则串行化的闸门**：同一时刻每条规则最多一个正在进行的固定会话运行；运行期间的新变化不会新建会话，而是把文件清单**合并**进“待补”缓冲（去重、按序），会话空闲后自动补跑一次（不会积累无界积压）。
+2. 运行解析 `sessionKey` 的映射：
+   - 会话仍存活 → **直接复用**（作为后续消息提交，模型链/预设不再重新解析）；
+   - 有映射但会话已不在 → **尽力 resume**（`ctx.agents.resume`；需要宿主已挂载会话持久化后端），失败则用该规则**当前配置**重新创建会话并更新映射；
+   - 无映射 → 用当前配置（工作区、模型链、预设）创建会话并写入映射。
+3. 模型链回退只在（重）创建会话时发生；对一个存活的固定会话的后续触发不会回退、也不会派生第二个会话。
+4. 固定会话存活的期间，修改规则的**运行配置**（`workspaceId` / `agentPreset` / `models` / `allowedProviders`）不会中途改掉正在使用的会话——改动要等到会话消亡或用户手动「重置固定会话」后，下一次触发才用新配置重建。提示词 / 标题的修改每次触发都会生效（无需重置）。
+5. Host 重启后映射仍在（持久化在 storage domain 的 `pinnedSessions` 表）：下一次触发会**尽力 resume** 原会话；若会话已无法恢复（无持久化后端 / 会话已删除）则自动用当前配置重建。
+
+### 管理界面
+
+表单可在「每次触发新建会话」与「固定会话（跨触发复用）」之间选择；选固定会话时需填写会话 Key。列表中固定会话的规则会显示 **pinned** 徽标（绿点 = 存活、红点 = 已失效）、当前会话 id 与存活状态，并提供 **「重置固定会话」** 操作：结束当前固定会话并清除映射，下一次触发用最新配置新建。
+
 ## HTTP API
 
 Host 半端在 `/file-events/api` 注册一个 prefix route：
@@ -121,14 +165,15 @@ Host 半端在 `/file-events/api` 注册一个 prefix route：
 | 方法 | 路径 | body | 返回 |
 |---|---|---|---|
 | GET | `/file-events/api` | — | `{ rules }` |
-| POST | `/file-events/api` | 规则（`title`/`prompt`/`workspaceId`/`watchPaths` 必填，其余可选） | `{ rule }` |
+| POST | `/file-events/api` | 规则（`title`/`prompt`/`workspaceId`/`watchPaths` 必填，其余可选，含 `sessionMode?`/`sessionKey?`） | `{ rule }` |
 | PATCH | `/file-events/api` | `{ id, ...patch }` | `{ rule }` |
 | DELETE | `/file-events/api` | `{ id }` | `{ removed: true }` |
 | POST | `/file-events/api/run` | `{ id }` | `{ rule }`（立即执行，跳过防抖，不含文件清单） |
+| POST | `/file-events/api/reset` | `{ id }` | `{ rule }`（重置该规则的固定会话） |
 | GET | `/file-events/api/workspaces` | — | `{ workspaces: [{ id, title }] }` |
 | GET | `/file-events/api/presets` | — | `{ presets: [{ id, name?, description?, isDefault, broken? }] }` |
 
-`PATCH` 省略某字段则保持原值；显式传空值清除对应字段：`watchPaths` 不能为空数组，`globs` / `ignoreGlobs` / `models` / `allowedProviders` 传 `[]`、`agentPreset` 传 `null` / `""` 均清除。`POST /run` 只执行一次（相当于手动触发、无文件事件）。
+`PATCH` 省略某字段则保持原值；显式传空值清除对应字段：`watchPaths` 不能为空数组，`globs` / `ignoreGlobs` / `models` / `allowedProviders` 传 `[]`、`agentPreset` 传 `null` / `""` 均清除，`sessionMode: "fresh"` 或 `sessionKey: null`/`""` 会清除固定会话映射。`GET` 返回的每条 rule 都包含已配置的 `models` / `allowedProviders` / `agentPreset` / `sessionMode`（pinned 时含 `sessionKey`）与最近运行的元数据（若有）；固定会话的规则额外带上 `pinnedSession: { sessionId, provider?, model?, createdAt, live }`（尚无映射时为 `undefined`），供界面显示当前会话与存活状态。`POST /run` 只执行一次（相当于手动触发、无文件事件）。
 
 ## 开发
 
