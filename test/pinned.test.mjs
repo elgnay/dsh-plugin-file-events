@@ -73,10 +73,10 @@ test('rule schema rejects an unknown sessionMode', () => {
 
 // ── domain spec declares the mapping table ────────────────────────────────
 
-test('domain spec declares a pinnedSessions table under the unit', () => {
+test('domain spec declares a pinned_sessions table under the unit', () => {
   assert.equal(domainSpec.name, 'file_events')
-  assert.ok(domainSpec.tables.pinnedSessions)
-  assert.equal(domainSpec.tables.pinnedSessions.valueSchema, pinnedSessionSchema)
+  assert.ok(domainSpec.tables.pinned_sessions)
+  assert.equal(domainSpec.tables.pinned_sessions.valueSchema, pinnedSessionSchema)
 })
 
 // ── normalizeSessionMode ──────────────────────────────────────────────────

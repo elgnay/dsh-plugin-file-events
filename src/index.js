@@ -111,16 +111,17 @@ const ruleSchema = z.object({
 
 /**
  * The file-events domain: a `rules` table keyed by rule id plus a
- * `pinnedSessions` table keyed by sessionKey holding the durable
+ * `pinned_sessions` table keyed by sessionKey holding the durable
  * sessionKey → dsh session id mapping. The added table is additive, so the
  * domain stays at version 1 exactly like the earlier fork fields did.
+ * (Table names must match the host's `^[a-z][a-z0-9_]*$` rule.)
  */
 const domainSpec = {
   name: 'file_events',
   version: 1,
   tables: {
     rules: { valueSchema: ruleSchema },
-    pinnedSessions: { valueSchema: pinnedSessionSchema },
+    pinned_sessions: { valueSchema: pinnedSessionSchema },
   },
 }
 
@@ -1595,7 +1596,7 @@ module.exports = {
         domain.close().catch(() => {})
       }, 'file-events: domain close')
       table = domain.table('rules')
-      pinnedTable = domain.table('pinnedSessions')
+      pinnedTable = domain.table('pinned_sessions')
       rescheduleAll()
     })()
 

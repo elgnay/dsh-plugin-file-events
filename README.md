@@ -152,7 +152,7 @@ dsh plugin --profile web add dsh-plugin-file-events
    - 无映射 → 用当前配置（工作区、模型链、预设）创建会话并写入映射。
 3. 模型链回退只在（重）创建会话时发生；对一个存活的固定会话的后续触发不会回退、也不会派生第二个会话。
 4. 固定会话存活的期间，修改规则的**运行配置**（`workspaceId` / `agentPreset` / `models` / `allowedProviders`）不会中途改掉正在使用的会话——改动要等到会话消亡或用户手动「重置固定会话」后，下一次触发才用新配置重建。提示词 / 标题的修改每次触发都会生效（无需重置）。
-5. Host 重启后映射仍在（持久化在 storage domain 的 `pinnedSessions` 表）：下一次触发会**尽力 resume** 原会话；若会话已无法恢复（无持久化后端 / 会话已删除）则自动用当前配置重建。
+5. Host 重启后映射仍在（持久化在 storage domain 的 `pinned_sessions` 表）：下一次触发会**尽力 resume** 原会话；若会话已无法恢复（无持久化后端 / 会话已删除）则自动用当前配置重建。
 
 ### 管理界面
 
