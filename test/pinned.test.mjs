@@ -21,6 +21,9 @@ const {
   normalizeSessionMode,
   normalizeSessionModeValue,
   normalizeSessionKey,
+  normalizeResetOnRun,
+  isResetOnRunRecord,
+  assertResetOnRunPinned,
   isPinnedRecord,
   sessionKeyTaken,
   unionFiles,
@@ -250,4 +253,55 @@ test('pinnedSessionSchema requires the key, session id, and stamps', () => {
   assert.equal(pinnedSessionSchema.safeParse({ sessionKey: 'k', createdAt: 'a', updatedAt: 'a' }).success, false)
   assert.equal(pinnedSessionSchema.safeParse({ sessionKey: 'k', sessionId: 's', createdAt: 'a' }).success, false)
   assert.equal(pinnedSessionSchema.safeParse({ sessionKey: 'k', sessionId: 's', createdAt: 'a', updatedAt: 'a' }).success, true)
+})
+
+// ── resetOnRun (clear the pinned session before each trigger) ─────────────
+
+test('rule schema accepts resetOnRun: true in pinned mode', () => {
+  const record = baseRule({ sessionMode: 'pinned', sessionKey: 'raw-ingest', resetOnRun: true })
+  assert.equal(ruleSchema.safeParse(record).success, true)
+})
+
+test('normalizeResetOnRun maps only an explicit true to true', () => {
+  assert.equal(normalizeResetOnRun(true), true)
+  for (const off of [undefined, null, '', false]) {
+    assert.equal(normalizeResetOnRun(off), undefined, `value ${JSON.stringify(off)}`)
+  }
+  assert.throws(() => normalizeResetOnRun('yes'), /resetOnRun must be a boolean/)
+  assert.throws(() => normalizeResetOnRun(1), /resetOnRun must be a boolean/)
+  assert.throws(() => normalizeResetOnRun({}), /resetOnRun must be a boolean/)
+})
+
+test('isResetOnRunRecord detects only records carrying resetOnRun: true', () => {
+  assert.equal(isResetOnRunRecord({ resetOnRun: true, sessionMode: 'pinned', sessionKey: 'k' }), true)
+  assert.equal(isResetOnRunRecord({ resetOnRun: false }), false)
+  assert.equal(isResetOnRunRecord({}), false)
+  assert.equal(isResetOnRunRecord(null), false)
+  assert.equal(isResetOnRunRecord(undefined), false)
+})
+
+test('assertResetOnRunPinned passes for a pinned record and throws otherwise', () => {
+  assert.doesNotThrow(() => assertResetOnRunPinned({ sessionMode: 'pinned', sessionKey: 'k', resetOnRun: true }))
+  assert.throws(() => assertResetOnRunPinned({ resetOnRun: true }),
+    /resetOnRun is only valid when sessionMode is "pinned"/)
+  assert.throws(() => assertResetOnRunPinned({ sessionMode: 'fresh', resetOnRun: true }),
+    /resetOnRun is only valid when sessionMode is "pinned"/)
+  assert.doesNotThrow(() => assertResetOnRunPinned({ sessionMode: 'pinned', sessionKey: 'k' }))
+  assert.doesNotThrow(() => assertResetOnRunPinned(null))
+})
+
+test('buildRule persists resetOnRun only when pinned and true', () => {
+  const on = buildRule(baseInput({ sessionMode: 'pinned', sessionKey: 'raw-ingest', resetOnRun: true }))
+  assert.equal(on.resetOnRun, true)
+  const off = buildRule(baseInput({ sessionMode: 'pinned', sessionKey: 'raw-ingest', resetOnRun: false }))
+  assert.equal('resetOnRun' in off, false)
+  const absent = buildRule(baseInput({ sessionMode: 'pinned', sessionKey: 'raw-ingest' }))
+  assert.equal('resetOnRun' in absent, false)
+})
+
+test('buildRule rejects resetOnRun: true outside pinned mode', () => {
+  assert.throws(() => buildRule(baseInput({ resetOnRun: true })),
+    /resetOnRun is only valid when sessionMode is "pinned"/)
+  assert.throws(() => buildRule(baseInput({ sessionMode: 'fresh', resetOnRun: true })),
+    /resetOnRun is only valid when sessionMode is "pinned"/)
 })

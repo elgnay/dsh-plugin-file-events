@@ -95,9 +95,11 @@ const ruleSchema = z.object({
   models: z.array(modelCandidateSchema).optional(),
   allowedProviders: z.array(z.string().min(1)).optional(),
   // Pinned-session mode: reuse one stable session across every run of this
-  // rule instead of a fresh session per trigger.
+  // rule instead of a fresh session per trigger. `resetOnRun` additionally
+  // clears that pinned session before each run (only meaningful when pinned).
   sessionMode: z.enum(['fresh', 'pinned']).optional(),
   sessionKey: z.string().optional(),
+  resetOnRun: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
   lastTriggerAt: z.string().optional(),
@@ -304,6 +306,34 @@ function normalizeSessionMode(input) {
   }
   // Fresh mode always discards any supplied key (clears a pinned mapping).
   return { sessionMode: 'fresh', sessionKey: undefined }
+}
+
+/**
+ * Validate a raw `resetOnRun` value. `undefined`/`null`/`""` and an explicit
+ * `false` all normalize to `undefined` (off — the field is never stored as
+ * false); `true` is returned as `true` (the only value ever persisted). Any
+ * other value is rejected: the flag must be a boolean.
+ */
+function normalizeResetOnRun(value) {
+  if (value === undefined || value === null || value === '' || value === false) return undefined
+  if (value === true) return true
+  throw new Error('resetOnRun must be a boolean')
+}
+
+/** True when a record asks to clear its pinned session before every run. */
+function isResetOnRunRecord(record) {
+  return !!record && record.resetOnRun === true
+}
+
+/**
+ * `resetOnRun` is only meaningful while the session is pinned; a record that
+ * carries the flag outside pinned mode is a write-time error, so a stray
+ * `resetOnRun: true` can never silently run as a fresh job.
+ */
+function assertResetOnRunPinned(record) {
+  if (record && record.resetOnRun === true && !isPinnedRecord(record)) {
+    throw new Error('resetOnRun is only valid when sessionMode is "pinned"')
+  }
 }
 
 /** True when a record is configured for pinned-session execution. */
@@ -655,6 +685,10 @@ function buildRule(input) {
   const { models, allowedProviders } = normalizeModelFields(input)
   const agentPreset = normalizeAgentPreset(input.agentPreset)
   const { sessionMode, sessionKey } = normalizeSessionMode(input)
+  const resetOnRun = normalizeResetOnRun(input && input.resetOnRun)
+  if (resetOnRun === true && sessionMode !== 'pinned') {
+    throw new Error('resetOnRun is only valid when sessionMode is "pinned"')
+  }
   const watchPaths = normalizeWatchPaths(input.watchPaths)
   const globs = normalizeGlobList(input.globs)
   const ignoreGlobs = normalizeGlobList(input.ignoreGlobs)
@@ -676,6 +710,8 @@ function buildRule(input) {
     ...(allowedProviders === undefined ? {} : { allowedProviders }),
     // Persist pinned mode only when actually pinned (legacy rules stay fresh).
     ...(sessionMode === 'pinned' ? { sessionMode: 'pinned', sessionKey } : {}),
+    // resetOnRun is stored only when true; an explicit false/absent is omitted.
+    ...(sessionMode === 'pinned' && resetOnRun === true ? { resetOnRun: true } : {}),
     createdAt: now,
     updatedAt: now,
   }
@@ -702,6 +738,9 @@ module.exports = {
     normalizeSessionMode,
     normalizeSessionModeValue,
     normalizeSessionKey,
+    normalizeResetOnRun,
+    isResetOnRunRecord,
+    assertResetOnRunPinned,
     isPinnedRecord,
     sessionKeyTaken,
     unionFiles,
@@ -794,6 +833,29 @@ module.exports = {
       if (!handle) return
       pinnedHandles.delete(sessionId)
       await handle.dispose().catch(() => {})
+    }
+
+    /**
+     * Automatic per-run reset for `resetOnRun: true` pinned rules. The host
+     * exposes no in-place transcript clear, so the mapped session is ended via
+     * its retained handle (the handle holder is the only disposer) and the
+     * mapping is dropped; the run that follows then (re)creates a fresh session
+     * under the same sessionKey with the current config. The gate makes the
+     * previous run idle before this runs, so disposal is never racing live
+     * work. Disposal is awaited (not swallowed) so a failed reset fails the run
+     * loudly instead of silently reusing polluted context, and the mapping is
+     * only dropped after disposal succeeds, so a failed reset leaves the old
+     * mapping intact for the next attempt.
+     */
+    const resetPinnedForRun = async (key) => {
+      const mapping = getPin(key)
+      if (!mapping) return
+      const handle = pinnedHandles.get(mapping.sessionId)
+      if (handle) {
+        await handle.dispose()
+        pinnedHandles.delete(mapping.sessionId)
+      }
+      await deletePin(key)
     }
 
     /** Present a stored mapping as list/API metadata for one pinned rule. */
@@ -1083,6 +1145,15 @@ module.exports = {
       const startedAt = new Date().toISOString()
       const fail = (error) => failedBeforeAttempts(rule, startedAt, error)
       const key = rule.sessionKey
+      // resetOnRun: clear the previous pinned session before this run so each
+      // run starts from empty context in a session under the same sessionKey.
+      if (rule.resetOnRun === true) {
+        try {
+          await resetPinnedForRun(key)
+        } catch (error) {
+          return fail(error)
+        }
+      }
       const mapping = getPin(key)
 
       if (mapping !== undefined) {
@@ -1513,6 +1584,23 @@ module.exports = {
       } else {
         delete next.sessionMode
         delete next.sessionKey
+      }
+      // resetOnRun is only meaningful for a pinned session. An explicit PATCH
+      // enables it (persisted as true) or disables it (false/empty clears); an
+      // omitted field keeps the current value while pinned. Switching pinned →
+      // fresh clears the flag; explicitly enabling it under a fresh target is a
+      // contradiction and is rejected.
+      const resetPatched = !!(patch && 'resetOnRun' in patch)
+      const resetWanted = resetPatched
+        ? normalizeResetOnRun(patch.resetOnRun) === true
+        : mode === 'pinned' && current.resetOnRun === true
+      if (resetWanted) {
+        if (mode !== 'pinned') {
+          throw new Error('resetOnRun is only valid when sessionMode is "pinned"')
+        }
+        next.resetOnRun = true
+      } else {
+        delete next.resetOnRun
       }
       assertAllowedProviders(next)
       await requireTable().put(id, next)

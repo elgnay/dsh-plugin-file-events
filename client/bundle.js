@@ -139,6 +139,10 @@ window.__ModuleLoader__.load({
       resetPinned: '重置固定会话',
       resetPinnedHint: '结束当前固定会话；下次触发会用最新配置新建会话。',
       resetConfirm: '重置会结束当前固定会话，下次触发会用最新配置新建一个会话。确定重置？',
+      // New: resetOnRun
+      resetOnRunLabel: '每次触发前重置会话',
+      resetOnRunHint: '开启后，该固定会话的上下文会在每次触发开始时被清空（会话 Key 保持不变）；运行配置（工作区/模型/预设）的改动也会在下次触发自动生效，无需手动重置。',
+      resetOnRunBadge: '每次重置',
     }
 
     const EN = {
@@ -235,6 +239,10 @@ window.__ModuleLoader__.load({
       resetPinned: 'Reset pinned session',
       resetPinnedHint: 'Ends the current pinned session; the next trigger creates one with the latest config.',
       resetConfirm: 'Resetting ends the current pinned session; the next trigger will create a new one with the latest config. Reset?',
+      // New: resetOnRun
+      resetOnRunLabel: 'Reset session before each trigger',
+      resetOnRunHint: 'When on, this pinned session\'s context is cleared at the start of every trigger (the session key stays the same); run-config changes (workspace / model / preset) also take effect automatically on the next trigger — no manual reset needed.',
+      resetOnRunBadge: 'reset/run',
     }
 
     const LOCALE_DICT = { zh: ZH, en: EN }
@@ -417,6 +425,7 @@ window.__ModuleLoader__.load({
           agentPreset: '',
           sessionMode: 'fresh',
           sessionKey: '',
+          resetOnRun: false,
         })
 
         /**
@@ -482,6 +491,7 @@ window.__ModuleLoader__.load({
             agentPreset: typeof item.agentPreset === 'string' ? item.agentPreset : '',
             sessionMode: item.sessionMode === 'pinned' ? 'pinned' : 'fresh',
             sessionKey: typeof item.sessionKey === 'string' ? item.sessionKey : '',
+            resetOnRun: item.resetOnRun === true,
           })
 
           // The payload always carries the policy fields. An empty `models: []` /
@@ -510,6 +520,8 @@ window.__ModuleLoader__.load({
               // any previously pinned mapping; "pinned" carries the session key.
               sessionMode: form.sessionMode,
               sessionKey: form.sessionMode === 'pinned' ? form.sessionKey.trim() : '',
+              // resetOnRun applies only in pinned mode; a fresh target clears it.
+              resetOnRun: form.sessionMode === 'pinned' ? form.resetOnRun === true : false,
             }
           }
 
@@ -765,6 +777,8 @@ window.__ModuleLoader__.load({
                         pin && React.createElement('span', { className: `fe-badgeDot${pinnedLive ? '' : ' fe-badgeDotDead'}`, 'aria-hidden': 'true' }),
                         t('pinnedBadge')
                       ),
+                      pinned && item.resetOnRun === true
+                        && React.createElement('span', { className: 'fe-badge', title: t('resetOnRunHint') }, t('resetOnRunBadge')),
                       pin && React.createElement('span', { className: 'fe-sessionId', title: pin.sessionId },
                         `${t('pinnedSessionId')}: ${shortId(pin.sessionId)}${pinnedLive ? '' : ` (${t('pinnedDead')})`}`
                       ),
@@ -930,7 +944,20 @@ window.__ModuleLoader__.load({
                     onChange: (event) => setForm((current) => ({ ...current, sessionKey: event.target.value })),
                   }),
                   React.createElement('small', { className: 'fe-hint' }, t('sessionKeyHint')),
-                  React.createElement('small', { className: 'fe-warn' }, t('sessionResetNeededHint'))
+                  // With resetOnRun the session is recreated each trigger anyway, so
+                  // run-config changes apply automatically and the manual-reset
+                  // reminder would be misleading.
+                  !form.resetOnRun && React.createElement('small', { className: 'fe-warn' }, t('sessionResetNeededHint'))
+                ),
+                form.sessionMode === 'pinned' && React.createElement('label', { className: 'fe-checkbox' },
+                  React.createElement('input', {
+                    type: 'checkbox',
+                    checked: form.resetOnRun,
+                    disabled,
+                    onChange: (event) => setForm((current) => ({ ...current, resetOnRun: event.target.checked })),
+                  }),
+                  React.createElement('span', null, t('resetOnRunLabel')),
+                  React.createElement('small', { className: 'fe-hint' }, t('resetOnRunHint'))
                 ),
                 renderModelEditor(form.models, form.modelsEnabled, (checked) => setForm((current) => ({ ...current, modelsEnabled: checked }))),
                 React.createElement('label', { className: 'fe-checkbox' },

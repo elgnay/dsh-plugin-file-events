@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-file-events",
-  "version": "0.2.0",
-  "description": "DeepSeek Harness plugin: folder-change event triggers. Each watch rule binds a workspace and one or more watched paths; when files change there (debounced), a fresh agent session starts on its own — no live chat session required. Rules may pick an agent preset, an ordered model chain with fallback, an allowedProviders allowlist (e.g. local-only), and reuse one stable pinned session across every trigger. Includes a management API and full-page UI.",
+  "version": "0.3.0",
+  "description": "DeepSeek Harness plugin: folder-change event triggers. Each watch rule binds a workspace and one or more watched paths; when files change there (debounced), a fresh agent session starts on its own — no live chat session required. Rules may pick an agent preset, an ordered model chain with fallback, an allowedProviders allowlist (e.g. local-only), reuse one stable pinned session across every trigger, and optionally clear that pinned session's context at the start of every trigger (resetOnRun). Includes a management API and full-page UI.",
   "license": "MIT",
   "keywords": [
     "dsh",
@@ -16,7 +16,8 @@
     "model-chain",
     "fallback",
     "agent-preset",
-    "pinned-session"
+    "pinned-session",
+    "reset-on-run"
   ],
   "main": "src/index.js",
   "exports": {

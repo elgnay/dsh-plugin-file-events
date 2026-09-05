@@ -8,6 +8,7 @@ DeepSeek Harness 插件：**文件变化事件触发**。每条监听规则（wa
 - 可通过 `allowedProviders` 限定候选 provider，确保触发任务永远不会误用白名单之外的 provider（例如仅本地 `local`）。
 - 规则可指定会话挂载的 **agent 预设**（`agentPreset`），让不同规则以不同工具集运行。
 - 规则可选择 **pinned（固定会话）模式**：所有触发复用同一个稳定的 agent 会话（`sessionKey` → 持久化的会话映射），而不是每次触发新建——便于在同一会话中追踪一条规则的连续历史。
+- 固定会话可配合 **`resetOnRun`**：每次触发前清空该固定会话的上下文（会话 Key 保持不变），避免长历史跨触发累积带来的上下文污染，同时不产生无界的会话堆积。
 
 ## 安装
 
@@ -64,6 +65,7 @@ dsh plugin --profile web add dsh-plugin-file-events
 | `agentPreset` | 否 | 触发会话挂载的 agent 预设 id；留空用全局默认预设 |
 | `sessionMode` | 否 | `"fresh" \| "pinned"`，默认 `"fresh"`；见「固定会话模式」 |
 | `sessionKey` | 否 | 固定会话的逻辑 Key，匹配 `[a-z0-9][a-z0-9-]*`；仅当 `sessionMode: "pinned"` 时必填，且一个 Key 只能被一条规则使用 |
+| `resetOnRun` | 否 | 布尔；仅当 `sessionMode: "pinned"` 时有效。`true` = 每次触发前清空该固定会话的上下文 |
 
 示例：
 
@@ -132,6 +134,7 @@ dsh plugin --profile web add dsh-plugin-file-events
   "debounceMs": 15000,
   "sessionMode": "pinned",
   "sessionKey": "web-raw-ingest", // 同一 Key 只能被一条规则使用
+  "resetOnRun": true, // 每次触发前清空该固定会话的上下文
   "agentPreset": "web",
   "allowedProviders": ["local"]
 }
@@ -142,6 +145,15 @@ dsh plugin --profile web add dsh-plugin-file-events
 - `sessionMode`：`"fresh" | "pinned"`，默认 `"fresh"`（缺失即默认，旧数据无需迁移）。
 - `sessionKey`：固定会话的逻辑 Key，需匹配 `[a-z0-9][a-z0-9-]*`；仅当 `sessionMode: "pinned"` 时必填。**一个 Key 只能被一条规则使用**（多条规则共享一个固定会话不在范围内）。
 - `sessionMode: "fresh"`（或 `sessionKey: null` / `""`）会清除固定的会话映射；PATCH 把该字段从 `pinned` 改为 `fresh` 会丢弃旧映射。
+- `resetOnRun`：可选布尔，仅在 `sessionMode: "pinned"` 时有效（pinned 之外写 `true` 会被拒绝）。缺省 / `false` = 旧行为（上下文跨触发累积）；`true` = **每次触发前清空该固定会话的上下文**，再在同一个 `sessionKey` 下重新开始本轮——历史不会跨触发累积。
+
+### 每次触发前重置（resetOnRun）
+
+Pinned 会话避免了会话泛滥，但会把上下文跨触发累积下来；触发很多次后历史污染可能导致输出串语言 / 过长。`resetOnRun: true` 在二者之间折中：**一条规则仍只有一个固定会话、一个 `sessionKey`，但每一轮都从清空后的上下文开始**。
+
+宿主没有“就地清空会话记录”的原语，因此实现采用：本轮触发前，结束（dispose）该固定会话当前存活的句柄并删除 `sessionKey → sessionId` 映射，随后触发以当前配置在该 Key 下**重建**一个新会话——旧会话从活跃列表消失，不会留下无界的活跃会话堆积，Key 保持不变。由此带来的一个自然推论：开启 `resetOnRun` 的规则每次触发都会重新走**模型链回退 / 预设解析**，且**运行配置**（`workspaceId` / `agentPreset` / `models` / `allowedProviders`）的改动会在**下一次触发自动生效**，无需手动「重置固定会话」。
+
+重置是**触发前**发生的：若上一条会话无法被干净地结束（dispose 失败），本轮触发会直接失败并给出明确错误（`failed before attempts`），而不会用被污染的上下文静默继续。
 
 ### 执行语义
 
@@ -156,7 +168,7 @@ dsh plugin --profile web add dsh-plugin-file-events
 
 ### 管理界面
 
-表单可在「每次触发新建会话」与「固定会话（跨触发复用）」之间选择；选固定会话时需填写会话 Key。列表中固定会话的规则会显示 **pinned** 徽标（绿点 = 存活、红点 = 已失效）、当前会话 id 与存活状态，并提供 **「重置固定会话」** 操作：结束当前固定会话并清除映射，下一次触发用最新配置新建。
+表单可在「每次触发新建会话」与「固定会话（跨触发复用）」之间选择；选固定会话时需填写会话 Key，并可勾选 **「每次触发前重置会话」**（`resetOnRun`）——开启后提示词会注明上下文每轮清空、运行配置改动无需手动重置。列表中固定会话的规则会显示 **pinned** 徽标（绿点 = 存活、红点 = 已失效，开启 resetOnRun 时另附「每次重置」徽标）、当前会话 id 与存活状态，并提供 **「重置固定会话」** 操作：结束当前固定会话并清除映射，下一次触发用最新配置新建。
 
 ## HTTP API
 
@@ -165,7 +177,7 @@ Host 半端在 `/file-events/api` 注册一个 prefix route：
 | 方法 | 路径 | body | 返回 |
 |---|---|---|---|
 | GET | `/file-events/api` | — | `{ rules }` |
-| POST | `/file-events/api` | 规则（`title`/`prompt`/`workspaceId`/`watchPaths` 必填，其余可选，含 `sessionMode?`/`sessionKey?`） | `{ rule }` |
+| POST | `/file-events/api` | 规则（`title`/`prompt`/`workspaceId`/`watchPaths` 必填，其余可选，含 `sessionMode?`/`sessionKey?`/`resetOnRun?`） | `{ rule }` |
 | PATCH | `/file-events/api` | `{ id, ...patch }` | `{ rule }` |
 | DELETE | `/file-events/api` | `{ id }` | `{ removed: true }` |
 | POST | `/file-events/api/run` | `{ id }` | `{ rule }`（立即执行，跳过防抖，不含文件清单） |
@@ -173,7 +185,7 @@ Host 半端在 `/file-events/api` 注册一个 prefix route：
 | GET | `/file-events/api/workspaces` | — | `{ workspaces: [{ id, title }] }` |
 | GET | `/file-events/api/presets` | — | `{ presets: [{ id, name?, description?, isDefault, broken? }] }` |
 
-`PATCH` 省略某字段则保持原值；显式传空值清除对应字段：`watchPaths` 不能为空数组，`globs` / `ignoreGlobs` / `models` / `allowedProviders` 传 `[]`、`agentPreset` 传 `null` / `""` 均清除，`sessionMode: "fresh"` 或 `sessionKey: null`/`""` 会清除固定会话映射。`GET` 返回的每条 rule 都包含已配置的 `models` / `allowedProviders` / `agentPreset` / `sessionMode`（pinned 时含 `sessionKey`）与最近运行的元数据（若有）；固定会话的规则额外带上 `pinnedSession: { sessionId, provider?, model?, createdAt, live }`（尚无映射时为 `undefined`），供界面显示当前会话与存活状态。`POST /run` 只执行一次（相当于手动触发、无文件事件）。
+`PATCH` 省略某字段则保持原值；显式传空值清除对应字段：`watchPaths` 不能为空数组，`globs` / `ignoreGlobs` / `models` / `allowedProviders` 传 `[]`、`agentPreset` 传 `null` / `""` 均清除，`sessionMode: "fresh"` 或 `sessionKey: null`/`""` 会清除固定会话映射，`resetOnRun: false` 会关闭（`true` 只在 pinned 目标下有效）。`GET` 返回的每条 rule 都包含已配置的 `models` / `allowedProviders` / `agentPreset` / `sessionMode`（pinned 时含 `sessionKey`，开启时为 `resetOnRun: true`）与最近运行的元数据（若有）；固定会话的规则额外带上 `pinnedSession: { sessionId, provider?, model?, createdAt, live }`（尚无映射时为 `undefined`），供界面显示当前会话与存活状态。`POST /run` 只执行一次（相当于手动触发、无文件事件）。
 
 ## 开发
 
